@@ -29,16 +29,19 @@ impl Default for Cell {
 
 pub struct Terminal {
     pub grid: Vec<Vec<Cell>>,
+    pub history: Vec<Vec<Cell>>, // NEW: History Buffer
     pub cols: usize,
     pub rows: usize,
     pub cursor_x: usize,
     pub cursor_y: usize,
+    pub scroll_offset: usize,    // NEW: How far back are we scrolled?
+
     pub current_fg: Color,
     pub current_bg: Color,
     pub current_inverse: bool,
     pub saved_cursor_x: usize,
     pub saved_cursor_y: usize,
-    pub mouse_reporting: bool, // NEW: Mouse tracking flag
+    pub mouse_reporting: bool,
 }
 
 impl Terminal {
@@ -46,16 +49,19 @@ impl Terminal {
         let grid = vec![vec![Cell::default(); cols]; rows];
         Self {
             grid,
+            history: Vec::new(),
             cols,
             rows,
             cursor_x: 0,
             cursor_y: 0,
+            scroll_offset: 0,
+
             current_fg: Color::DefaultFg,
             current_bg: Color::DefaultBg,
             current_inverse: false,
             saved_cursor_x: 0,
             saved_cursor_y: 0,
-            mouse_reporting: false, // Default is OFF
+            mouse_reporting: false,
         }
     }
 
@@ -63,10 +69,52 @@ impl Terminal {
         self.cursor_y += 1;
         if self.cursor_y >= self.rows {
             self.cursor_y = self.rows - 1;
-            self.grid.remove(0);
+
+            // NEW: Instead of deleting, move the top row to history
+            let old_row = self.grid.remove(0);
+
+            // Optional: Limit history to 10,000 lines to save RAM
+            if self.history.len() > 10_000 {
+                self.history.remove(0);
+            }
+            self.history.push(old_row);
+
             self.grid.push(vec![Cell::default(); self.cols]);
         }
         self.cursor_x = 0;
+    }
+
+    // NEW: Scroll helpers
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.scroll_offset = (self.scroll_offset + lines).min(self.history.len());
+    }
+
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    }
+
+    // NEW: The "View" logic.
+    // This figures out which row to return based on scroll position.
+    pub fn get_visible_row(&self, screen_y: usize) -> &Vec<Cell> {
+        if self.scroll_offset == 0 {
+            // Normal view: just return the grid
+            &self.grid[screen_y]
+        } else {
+            // Scrolled view: do the math
+            let total_history = self.history.len();
+            let rows_from_bottom = self.rows - 1 - screen_y; // 0 at bottom, 23 at top
+            let effective_offset = self.scroll_offset + rows_from_bottom;
+
+            // If the offset pushes us into history...
+            if effective_offset >= self.rows {
+                let history_index = total_history - (effective_offset - self.rows + 1);
+                &self.history[history_index]
+            } else {
+                // We are seeing part of the grid
+                 let grid_index = self.rows - effective_offset - 1;
+                 &self.grid[grid_index]
+            }
+        }
     }
 
     fn blank_cell(&self) -> Cell {
@@ -87,9 +135,15 @@ impl Terminal {
         self.cols = new_cols;
         self.cursor_x = self.cursor_x.min(self.cols - 1);
         self.cursor_y = self.cursor_y.min(self.rows - 1);
+
+        // Reset scroll on resize to avoid confusion
+        self.scroll_offset = 0;
     }
 }
 
+// ... The 'impl Perform for Terminal' block stays exactly the same ...
+// Copy paste the 'impl Perform' from the previous step here.
+// Be sure to keep the csi_dispatch, execute, print methods.
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
         if self.cursor_x >= self.cols {
@@ -211,30 +265,24 @@ impl Perform for Terminal {
                     }
                 }
             }
-
-            // h = Set Mode (We use this for Mouse Enable)
             'h' => {
                  for p in params {
                      match p[0] {
-                         // Common mouse tracking modes
                          1000 | 1002 | 1006 | 1015 => self.mouse_reporting = true,
-                         25 => { /* Show Cursor (already visible) */ }
+                         25 => { }
                          _ => {}
                      }
                  }
             }
-
-            // l = Reset Mode (We use this for Mouse Disable)
             'l' => {
                  for p in params {
                      match p[0] {
                          1000 | 1002 | 1006 | 1015 => self.mouse_reporting = false,
-                         25 => { /* Hide Cursor (not implemented) */ }
+                         25 => { }
                          _ => {}
                      }
                  }
             }
-
             'm' => {
                 if params.len() == 0 {
                     self.current_fg = Color::DefaultFg;
@@ -245,7 +293,7 @@ impl Perform for Terminal {
                 for p_iter in params {
                     match p_iter[0] {
                         0 => { self.current_fg = Color::DefaultFg; self.current_bg = Color::DefaultBg; self.current_inverse = false; }
-                        1 => { // Bold
+                        1 => {
                             self.current_fg = match self.current_fg {
                                 Color::Black => Color::BrightBlack,
                                 Color::Red => Color::BrightRed,
@@ -260,7 +308,6 @@ impl Perform for Terminal {
                         }
                         7 => self.current_inverse = true,
                         27 => self.current_inverse = false,
-
                         30 => self.current_fg = Color::Black,
                         31 => self.current_fg = Color::Red,
                         32 => self.current_fg = Color::Green,
@@ -270,7 +317,6 @@ impl Perform for Terminal {
                         36 => self.current_fg = Color::Cyan,
                         37 => self.current_fg = Color::White,
                         39 => self.current_fg = Color::DefaultFg,
-
                         40 => self.current_bg = Color::Black,
                         41 => self.current_bg = Color::Red,
                         42 => self.current_bg = Color::Green,
@@ -280,7 +326,6 @@ impl Perform for Terminal {
                         46 => self.current_bg = Color::Cyan,
                         47 => self.current_bg = Color::White,
                         49 => self.current_bg = Color::DefaultBg,
-
                         90 => self.current_fg = Color::BrightBlack,
                         91 => self.current_fg = Color::BrightRed,
                         92 => self.current_fg = Color::BrightGreen,

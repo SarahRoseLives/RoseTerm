@@ -4,8 +4,8 @@ use crate::terminal::grid::{Terminal, Color};
 
 pub struct FontRenderer {
     font: Font,
-    pub char_width: f32,  // Changed to pub
-    pub char_height: f32, // Changed to pub
+    pub char_width: f32,
+    pub char_height: f32,
 }
 
 impl FontRenderer {
@@ -13,7 +13,7 @@ impl FontRenderer {
         let font_data = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
             .or_else(|_| std::fs::read("/usr/share/fonts/liberation/LiberationMono-Regular.ttf"))
             .or_else(|_| std::fs::read("/usr/share/fonts/gnu-free/FreeMono.ttf"))
-            .expect("Could not find a font file! Please install DejaVuSansMono or LiberationMono");
+            .expect("Could not find a font file!");
 
         let font = Font::from_bytes(font_data, FontSettings::default())
             .map_err(|e| anyhow::anyhow!("Error loading font: {}", e))?;
@@ -58,7 +58,11 @@ impl FontRenderer {
             pixel.copy_from_slice(&[bg_r, bg_g, bg_b, 255]);
         }
 
-        for (row_idx, row) in term.grid.iter().enumerate() {
+        // NEW: Loop through screen rows (0..rows)
+        for row_idx in 0..term.rows {
+            // NEW: Get the visible row (handles history vs grid)
+            let row = term.get_visible_row(row_idx);
+
             for (col_idx, cell) in row.iter().enumerate() {
 
                 let (fg, bg) = if cell.inverse {
@@ -127,19 +131,22 @@ impl FontRenderer {
             }
         }
 
-        let cx = (term.cursor_x as f32 * self.char_width) as usize;
-        let cy = (term.cursor_y as f32 * self.char_height) as usize;
-        let cursor_h = self.char_height as usize;
-        let cursor_w = self.char_width as usize;
+        // Only draw cursor if NOT scrolled (or minimal scroll)
+        if term.scroll_offset == 0 {
+            let cx = (term.cursor_x as f32 * self.char_width) as usize;
+            let cy = (term.cursor_y as f32 * self.char_height) as usize;
+            let cursor_h = self.char_height as usize;
+            let cursor_w = self.char_width as usize;
 
-        for y in cy..(cy + cursor_h) {
-            for x in cx..(cx + cursor_w) {
-                let idx = (y * screen_width as usize + x) * 4;
-                if idx + 3 < frame.len() {
-                    frame[idx] = 255 - frame[idx];
-                    frame[idx+1] = 255 - frame[idx+1];
-                    frame[idx+2] = 255 - frame[idx+2];
-                    frame[idx+3] = 255;
+            for y in cy..(cy + cursor_h) {
+                for x in cx..(cx + cursor_w) {
+                    let idx = (y * screen_width as usize + x) * 4;
+                    if idx + 3 < frame.len() {
+                        frame[idx] = 255 - frame[idx];
+                        frame[idx+1] = 255 - frame[idx+1];
+                        frame[idx+2] = 255 - frame[idx+2];
+                        frame[idx+3] = 255;
+                    }
                 }
             }
         }

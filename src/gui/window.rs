@@ -19,7 +19,6 @@ pub enum RoseEvent {
     PtyOutput(Vec<u8>),
 }
 
-// Helper to format SGR Mouse Codes
 fn encode_mouse(button: u8, x: usize, y: usize, release: bool) -> String {
     let suffix = if release { 'm' } else { 'M' };
     format!("\x1b[<{};{};{}{}", button, x + 1, y + 1, suffix)
@@ -48,7 +47,6 @@ impl RoseWindow {
 
         let renderer = FontRenderer::new()?;
 
-        // Calculate grid size
         let cols = (window_size.width as f32 / renderer.char_width) as usize;
         let rows = (window_size.height as f32 / renderer.char_height) as usize;
 
@@ -87,27 +85,56 @@ impl RoseWindow {
                    TextChar::Char(c) => {
                        let mut bytes = [0; 4];
                        let s = c.encode_utf8(&mut bytes);
+                       // Only type if we aren't scrolling around history?
+                       // Standard behavior: yes, typing sends to shell even if you are looking at history.
+                       // But usually typing snaps view to bottom.
+                       if self.terminal.scroll_offset > 0 {
+                           self.terminal.scroll_offset = 0;
+                       }
                        let _ = self.pty.writer.write_all(s.as_bytes());
                    }
                    TextChar::Back => {
+                       if self.terminal.scroll_offset > 0 { self.terminal.scroll_offset = 0; }
                        let _ = self.pty.writer.write_all(b"\x08");
                    }
                }
            }
         }
 
-        if input.key_pressed(VirtualKeyCode::Return) { let _ = self.pty.writer.write_all(b"\n"); }
-        if input.key_pressed(VirtualKeyCode::Up) { let _ = self.pty.writer.write_all(b"\x1b[A"); }
-        if input.key_pressed(VirtualKeyCode::Down) { let _ = self.pty.writer.write_all(b"\x1b[B"); }
-        if input.key_pressed(VirtualKeyCode::Right) { let _ = self.pty.writer.write_all(b"\x1b[C"); }
-        if input.key_pressed(VirtualKeyCode::Left) { let _ = self.pty.writer.write_all(b"\x1b[D"); }
+        if input.key_pressed(VirtualKeyCode::Return) {
+            if self.terminal.scroll_offset > 0 { self.terminal.scroll_offset = 0; }
+            let _ = self.pty.writer.write_all(b"\n");
+        }
+
+        // NEW: Shift + PageUp/Down for Scrollback
+        if input.held_shift() {
+            if input.key_pressed(VirtualKeyCode::PageUp) {
+                self.terminal.scroll_up(10);
+            }
+            if input.key_pressed(VirtualKeyCode::PageDown) {
+                self.terminal.scroll_down(10);
+            }
+            if input.key_pressed(VirtualKeyCode::Up) {
+                self.terminal.scroll_up(1);
+            }
+            if input.key_pressed(VirtualKeyCode::Down) {
+                self.terminal.scroll_down(1);
+            }
+        } else {
+            // Normal Arrow keys send to PTY
+            if input.key_pressed(VirtualKeyCode::Up) { let _ = self.pty.writer.write_all(b"\x1b[A"); }
+            if input.key_pressed(VirtualKeyCode::Down) { let _ = self.pty.writer.write_all(b"\x1b[B"); }
+            if input.key_pressed(VirtualKeyCode::Right) { let _ = self.pty.writer.write_all(b"\x1b[C"); }
+            if input.key_pressed(VirtualKeyCode::Left) { let _ = self.pty.writer.write_all(b"\x1b[D"); }
+        }
 
         // Mouse Handling
-        if self.terminal.mouse_reporting {
-            if let Some((mx, my)) = input.mouse() {
-                let col = (mx / self.renderer.char_width) as usize;
-                let row = (my / self.renderer.char_height) as usize;
+        if let Some((mx, my)) = input.mouse() {
+            let col = (mx / self.renderer.char_width) as usize;
+            let row = (my / self.renderer.char_height) as usize;
 
+            if self.terminal.mouse_reporting {
+                // Application Mode (nano/htop) handles mouse
                 if input.mouse_pressed(0) {
                     let msg = encode_mouse(0, col, row, false);
                     let _ = self.pty.writer.write_all(msg.as_bytes());
@@ -124,6 +151,14 @@ impl RoseWindow {
                 } else if scroll < 0.0 {
                      let msg = encode_mouse(65, col, row, false);
                     let _ = self.pty.writer.write_all(msg.as_bytes());
+                }
+            } else {
+                // Standard Mode (Bash) - Mouse Wheel Scrolls History
+                let scroll = input.scroll_diff();
+                if scroll > 0.0 {
+                    self.terminal.scroll_up(3);
+                } else if scroll < 0.0 {
+                    self.terminal.scroll_down(3);
                 }
             }
         }
@@ -143,8 +178,6 @@ pub fn run() -> Result<()> {
     let mut input = WinitInputHelper::new();
 
     event_loop.run(move |event, _, control_flow| {
-        // FIX: Set ControlFlow to Wait.
-        // This stops the CPU from spinning at 100% when nothing is happening.
         *control_flow = ControlFlow::Wait;
 
         if let Event::RedrawRequested(_) = event {
@@ -178,6 +211,11 @@ pub fn run() -> Result<()> {
             }
 
             app.handle_input(&input);
+
+            // If scrolling happened, we need to redraw!
+            if app.terminal.scroll_offset > 0 || input.held_shift() {
+                app.window.request_redraw();
+            }
         }
     });
 }
