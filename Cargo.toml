@@ -1,0 +1,17 @@
+[package]
+name = "roseterm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+portable-pty = "0.8"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.10"
+winit = "0.28"
+pixels = "0.13"
+winit_input_helper = "0.14"
+
+# New dependencies
+vte = "0.11"      # The parser that understands terminal codes
+fontdue = "0.7"   # The font rasterizer
