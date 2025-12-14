@@ -82,8 +82,12 @@ impl RoseWindow {
     }
 
     pub fn handle_input(&mut self, input: &WinitInputHelper) {
-        // 1. Handle Typing
-        if !input.held_control() && !input.held_alt() {
+        // 1. Handle Typing (Letters, Numbers, AND Control Codes)
+        // FIX: We ALLOW Control keys now, so Ctrl+X works.
+        // We only block if Ctrl+Shift are BOTH held (because that's our Copy/Paste shortcut).
+        let is_copy_paste_hotkey = input.held_control() && input.held_shift();
+
+        if !is_copy_paste_hotkey && !input.held_alt() {
             if !input.text().is_empty() {
                for text_char in input.text() {
                    match text_char {
@@ -95,36 +99,15 @@ impl RoseWindow {
                        }
                        TextChar::Back => {
                            if self.terminal.scroll_offset > 0 { self.terminal.scroll_offset = 0; }
-                           let _ = self.pty.writer.write_all(b"\x08");
+                           // Send \x7f (DEL) or \x08 (BS) depending on config, usually \x7f works better for modern Linux
+                           let _ = self.pty.writer.write_all(b"\x7f");
                        }
                    }
                }
             }
         }
 
-        // --- SPECIAL KEYS ---
-
-        // Escape Key (Send \x1b instead of closing window)
-        if input.key_pressed(VirtualKeyCode::Escape) {
-            let _ = self.pty.writer.write_all(b"\x1b");
-        }
-
-        // Return Key
-        if input.key_pressed(VirtualKeyCode::Return) {
-            if self.terminal.scroll_offset > 0 { self.terminal.scroll_offset = 0; }
-            let _ = self.pty.writer.write_all(b"\n");
-        }
-
-        // Ctrl + C (Interrupt)
-        if input.held_control() && input.key_pressed(VirtualKeyCode::C) && !input.held_shift() {
-             if self.terminal.scroll_offset > 0 { self.terminal.scroll_offset = 0; }
-             let _ = self.pty.writer.write_all(&[0x03]);
-        }
-
-        // Ctrl + D (EOF)
-        if input.held_control() && input.key_pressed(VirtualKeyCode::D) && !input.held_shift() {
-             let _ = self.pty.writer.write_all(&[0x04]);
-        }
+        // --- COPY / PASTE COMMANDS ---
 
         // Paste: Shift + Insert
         if input.held_shift() && input.key_pressed(VirtualKeyCode::Insert) {
@@ -134,7 +117,7 @@ impl RoseWindow {
              }
         }
 
-        // Copy/Paste (Ctrl+Shift+C/V)
+        // Ctrl + Shift + C/V
         if input.held_control() && input.held_shift() {
             if input.key_pressed(VirtualKeyCode::C) {
                 let text = self.terminal.get_selected_text();
@@ -147,17 +130,36 @@ impl RoseWindow {
             }
         }
 
-        // Navigation (Arrows + PageUp/Down)
+        // --- SPECIAL KEYS ---
+        // Note: We removed the manual Ctrl+C/R/etc handling because the
+        // typing loop above now captures them automatically (e.g. Ctrl+C becomes \x03).
+
+        if input.key_pressed(VirtualKeyCode::Escape) {
+            let _ = self.pty.writer.write_all(b"\x1b");
+        }
+
+        if input.key_pressed(VirtualKeyCode::Return) {
+            if self.terminal.scroll_offset > 0 { self.terminal.scroll_offset = 0; }
+            let _ = self.pty.writer.write_all(b"\n");
+        }
+
+        // Navigation (Shift + PageUp/Down for History)
         if input.held_shift() && !input.held_control() {
             if input.key_pressed(VirtualKeyCode::PageUp) { self.terminal.scroll_up(10); }
             if input.key_pressed(VirtualKeyCode::PageDown) { self.terminal.scroll_down(10); }
             if input.key_pressed(VirtualKeyCode::Up) { self.terminal.scroll_up(1); }
             if input.key_pressed(VirtualKeyCode::Down) { self.terminal.scroll_down(1); }
         } else {
+            // Standard Arrow Keys (ANSI codes)
             if input.key_pressed(VirtualKeyCode::Up) { let _ = self.pty.writer.write_all(b"\x1b[A"); }
             if input.key_pressed(VirtualKeyCode::Down) { let _ = self.pty.writer.write_all(b"\x1b[B"); }
             if input.key_pressed(VirtualKeyCode::Right) { let _ = self.pty.writer.write_all(b"\x1b[C"); }
             if input.key_pressed(VirtualKeyCode::Left) { let _ = self.pty.writer.write_all(b"\x1b[D"); }
+
+            // Fix: Explicitly handle Home/End/Delete if 'text()' doesn't catch them
+            if input.key_pressed(VirtualKeyCode::Home) { let _ = self.pty.writer.write_all(b"\x1b[H"); }
+            if input.key_pressed(VirtualKeyCode::End) { let _ = self.pty.writer.write_all(b"\x1b[F"); }
+            if input.key_pressed(VirtualKeyCode::Delete) { let _ = self.pty.writer.write_all(b"\x1b[3~"); }
         }
 
         // --- MOUSE HANDLING ---
@@ -169,6 +171,7 @@ impl RoseWindow {
             let app_mouse_mode = self.terminal.mouse_reporting && !force_selection;
 
             if app_mouse_mode {
+                // Application Mode
                 if input.mouse_pressed(0) {
                     let _ = self.pty.writer.write_all(encode_mouse(0, col, row, false).as_bytes());
                 }
@@ -185,6 +188,7 @@ impl RoseWindow {
                      let _ = self.pty.writer.write_all(encode_mouse(65, col, row, false).as_bytes());
                 }
             } else {
+                // Standard Mode
                 if input.mouse_pressed(0) {
                     self.is_selecting = true;
                     self.terminal.start_selection(col, row);
@@ -198,15 +202,20 @@ impl RoseWindow {
 
                 if input.mouse_released(0) {
                     self.is_selecting = false;
+                    // Clear selection if it was just a click (Start == End)
                     if self.terminal.selection_start == self.terminal.selection_end {
                         self.terminal.clear_selection();
                         self.window.request_redraw();
                     }
                 }
+
+                // Copy on Right Click release
                 if input.mouse_released(1) {
                     let text = self.terminal.get_selected_text();
                     if !text.is_empty() {
                         let _ = self.clipboard.set_text(text);
+                        self.terminal.clear_selection();
+                        self.window.request_redraw();
                     }
                 }
                 let scroll = input.scroll_diff();
@@ -249,7 +258,6 @@ pub fn run() -> Result<()> {
         }
 
         if input.update(&event) {
-            // FIX: Only close on explicit close request (clicking X), NOT on Escape
             if input.close_requested() {
                 *control_flow = ControlFlow::Exit;
                 return;

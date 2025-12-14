@@ -24,7 +24,13 @@ impl Pty {
         })?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
-        let cmd = CommandBuilder::new(shell);
+
+        // FIX: Make 'cmd' mutable so we can set environment variables
+        let mut cmd = CommandBuilder::new(shell);
+
+        // FIX: Explicitly set TERM. This fixes "TERM environment variable not set"
+        cmd.env("TERM", "xterm-256color");
+
         pair.slave.spawn_command(cmd)?;
 
         let mut reader = pair.master.try_clone_reader()?;
@@ -36,8 +42,6 @@ impl Pty {
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => {
-                        // EOF detected: Shell has closed (user typed 'exit')
-                        // Tell the GUI to close.
                         let _ = proxy.send_event(RoseEvent::Exit);
                         break;
                     }
@@ -46,7 +50,6 @@ impl Pty {
                         let _ = proxy.send_event(RoseEvent::PtyOutput(bytes));
                     }
                     Err(_) => {
-                        // Read error implies PTY is gone
                         let _ = proxy.send_event(RoseEvent::Exit);
                         break;
                     }
