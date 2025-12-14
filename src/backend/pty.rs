@@ -9,7 +9,7 @@ use crate::gui::window::RoseEvent;
 
 pub struct Pty {
     pub writer: Box<dyn Write + Send>,
-    pub master: Box<dyn MasterPty + Send>, // We hold this to resize later
+    pub master: Box<dyn MasterPty + Send>,
 }
 
 impl Pty {
@@ -29,18 +29,27 @@ impl Pty {
 
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
-        let master = pair.master; // Move master to struct
+        let master = pair.master;
 
         thread::spawn(move || {
             let mut buffer = [0u8; 1024];
             loop {
                 match reader.read(&mut buffer) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        // EOF detected: Shell has closed (user typed 'exit')
+                        // Tell the GUI to close.
+                        let _ = proxy.send_event(RoseEvent::Exit);
+                        break;
+                    }
                     Ok(n) => {
                         let bytes = buffer[..n].to_vec();
                         let _ = proxy.send_event(RoseEvent::PtyOutput(bytes));
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        // Read error implies PTY is gone
+                        let _ = proxy.send_event(RoseEvent::Exit);
+                        break;
+                    }
                 }
             }
         });

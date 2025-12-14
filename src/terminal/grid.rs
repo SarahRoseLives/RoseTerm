@@ -29,12 +29,12 @@ impl Default for Cell {
 
 pub struct Terminal {
     pub grid: Vec<Vec<Cell>>,
-    pub history: Vec<Vec<Cell>>, // NEW: History Buffer
+    pub history: Vec<Vec<Cell>>,
     pub cols: usize,
     pub rows: usize,
     pub cursor_x: usize,
     pub cursor_y: usize,
-    pub scroll_offset: usize,    // NEW: How far back are we scrolled?
+    pub scroll_offset: usize,
 
     pub current_fg: Color,
     pub current_bg: Color,
@@ -42,6 +42,12 @@ pub struct Terminal {
     pub saved_cursor_x: usize,
     pub saved_cursor_y: usize,
     pub mouse_reporting: bool,
+
+    pub title: String,
+
+    // NEW: Selection Tracking (Start X,Y -> End X,Y)
+    pub selection_start: Option<(usize, usize)>,
+    pub selection_end: Option<(usize, usize)>,
 }
 
 impl Terminal {
@@ -62,7 +68,87 @@ impl Terminal {
             saved_cursor_x: 0,
             saved_cursor_y: 0,
             mouse_reporting: false,
+            title: "RoseTerm".to_string(),
+
+            selection_start: None,
+            selection_end: None,
         }
+    }
+
+    // NEW: Selection Helpers
+    pub fn start_selection(&mut self, col: usize, row: usize) {
+        self.selection_start = Some((col, row));
+        self.selection_end = Some((col, row));
+    }
+
+    pub fn update_selection(&mut self, col: usize, row: usize) {
+        if self.selection_start.is_some() {
+            self.selection_end = Some((col, row));
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection_start = None;
+        self.selection_end = None;
+    }
+
+    // Check if a specific cell is inside the selection rectangle
+    // We treat selection as a stream of text (like Notepad), not a block box
+    pub fn is_selected(&self, col: usize, row: usize) -> bool {
+        if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+            // Normalize so p1 is always before p2
+            let (p1, p2) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
+                (start, end)
+            } else {
+                (end, start)
+            };
+
+            // Logic for wrapping selection
+            if row < p1.1 || row > p2.1 { return false; } // Outside Y bounds
+
+            if row == p1.1 && row == p2.1 {
+                // Single line selection
+                return col >= p1.0 && col <= p2.0;
+            }
+
+            if row == p1.1 { return col >= p1.0; } // Start line: select to end
+            if row == p2.1 { return col <= p2.0; } // End line: select from start
+
+            return true; // Middle lines are fully selected
+        }
+        false
+    }
+
+    // Extract text string from selection
+    pub fn get_selected_text(&self) -> String {
+        let mut text = String::new();
+
+        if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+            let (p1, p2) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
+                (start, end)
+            } else {
+                (end, start)
+            };
+
+            for r in p1.1..=p2.1 {
+                // Be careful: rows can change if we scroll history during selection.
+                // For this prototype, we assume static screen coordinates.
+                let row_data = self.get_visible_row(r);
+
+                let start_col = if r == p1.1 { p1.0 } else { 0 };
+                let end_col = if r == p2.1 { p2.0 } else { self.cols - 1 };
+
+                for c in start_col..=end_col {
+                    if c < row_data.len() {
+                        text.push(row_data[c].char);
+                    }
+                }
+                if r != p2.1 {
+                    text.push('\n');
+                }
+            }
+        }
+        text
     }
 
     fn new_line(&mut self) {
@@ -70,10 +156,7 @@ impl Terminal {
         if self.cursor_y >= self.rows {
             self.cursor_y = self.rows - 1;
 
-            // NEW: Instead of deleting, move the top row to history
             let old_row = self.grid.remove(0);
-
-            // Optional: Limit history to 10,000 lines to save RAM
             if self.history.len() > 10_000 {
                 self.history.remove(0);
             }
@@ -84,7 +167,6 @@ impl Terminal {
         self.cursor_x = 0;
     }
 
-    // NEW: Scroll helpers
     pub fn scroll_up(&mut self, lines: usize) {
         self.scroll_offset = (self.scroll_offset + lines).min(self.history.len());
     }
@@ -93,24 +175,18 @@ impl Terminal {
         self.scroll_offset = self.scroll_offset.saturating_sub(lines);
     }
 
-    // NEW: The "View" logic.
-    // This figures out which row to return based on scroll position.
     pub fn get_visible_row(&self, screen_y: usize) -> &Vec<Cell> {
         if self.scroll_offset == 0 {
-            // Normal view: just return the grid
             &self.grid[screen_y]
         } else {
-            // Scrolled view: do the math
             let total_history = self.history.len();
-            let rows_from_bottom = self.rows - 1 - screen_y; // 0 at bottom, 23 at top
+            let rows_from_bottom = self.rows - 1 - screen_y;
             let effective_offset = self.scroll_offset + rows_from_bottom;
 
-            // If the offset pushes us into history...
             if effective_offset >= self.rows {
                 let history_index = total_history - (effective_offset - self.rows + 1);
                 &self.history[history_index]
             } else {
-                // We are seeing part of the grid
                  let grid_index = self.rows - effective_offset - 1;
                  &self.grid[grid_index]
             }
@@ -135,21 +211,15 @@ impl Terminal {
         self.cols = new_cols;
         self.cursor_x = self.cursor_x.min(self.cols - 1);
         self.cursor_y = self.cursor_y.min(self.rows - 1);
-
-        // Reset scroll on resize to avoid confusion
         self.scroll_offset = 0;
     }
 }
 
-// ... The 'impl Perform for Terminal' block stays exactly the same ...
-// Copy paste the 'impl Perform' from the previous step here.
-// Be sure to keep the csi_dispatch, execute, print methods.
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
         if self.cursor_x >= self.cols {
             self.new_line();
         }
-
         self.grid[self.cursor_y][self.cursor_x] = Cell {
             char: c,
             fg: self.current_fg,
@@ -165,6 +235,18 @@ impl Perform for Terminal {
             b'\r' => self.cursor_x = 0,
             0x08 => { if self.cursor_x > 0 { self.cursor_x -= 1; } }
             _ => {}
+        }
+    }
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.len() >= 2 {
+            let command = params[0];
+            let text_bytes = params[1];
+            if command == b"0" || command == b"2" {
+                if let Ok(title_str) = std::str::from_utf8(text_bytes) {
+                    self.title = title_str.to_string();
+                }
+            }
         }
     }
 

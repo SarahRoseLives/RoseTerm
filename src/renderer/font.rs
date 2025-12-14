@@ -58,14 +58,16 @@ impl FontRenderer {
             pixel.copy_from_slice(&[bg_r, bg_g, bg_b, 255]);
         }
 
-        // NEW: Loop through screen rows (0..rows)
         for row_idx in 0..term.rows {
-            // NEW: Get the visible row (handles history vs grid)
             let row = term.get_visible_row(row_idx);
 
             for (col_idx, cell) in row.iter().enumerate() {
 
-                let (fg, bg) = if cell.inverse {
+                // NEW: Handle Selection Highlighting
+                // If selected, override colors to White on Grey
+                let (fg, bg) = if term.is_selected(col_idx, row_idx) {
+                    (Color::Black, Color::BrightWhite) // High contrast selection
+                } else if cell.inverse {
                     (cell.bg, cell.fg)
                 } else {
                     (cell.fg, cell.bg)
@@ -131,7 +133,6 @@ impl FontRenderer {
             }
         }
 
-        // Only draw cursor if NOT scrolled (or minimal scroll)
         if term.scroll_offset == 0 {
             let cx = (term.cursor_x as f32 * self.char_width) as usize;
             let cy = (term.cursor_y as f32 * self.char_height) as usize;

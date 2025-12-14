@@ -15,3 +15,4 @@ winit_input_helper = "0.14"
 # New dependencies
 vte = "0.11"      # The parser that understands terminal codes
 fontdue = "0.7"   # The font rasterizer
+arboard = "3.2"
