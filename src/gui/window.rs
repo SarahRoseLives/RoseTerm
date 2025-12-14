@@ -23,15 +23,13 @@ pub struct RoseWindow {
     window: winit::window::Window,
     pixels: Pixels,
     pty: Pty,
-
-    // Components
     terminal: Terminal,
     parser: Parser,
     renderer: FontRenderer,
 }
 
 impl RoseWindow {
-    pub fn new(event_loop: &EventLoop<RoseEvent>, pty: Pty) -> Result<Self> {
+    pub fn new(event_loop: &EventLoop<RoseEvent>) -> Result<Self> {
         let size = LogicalSize::new(800.0, 600.0);
         let window = WindowBuilder::new()
             .with_title("RoseTerm")
@@ -42,8 +40,20 @@ impl RoseWindow {
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
         let pixels = Pixels::new(window_size.width, window_size.height, surface_texture)?;
 
+        // 1. Create Renderer first so we know char dimensions
         let renderer = FontRenderer::new()?;
-        let terminal = Terminal::new(80, 24);
+
+        // 2. Calculate initial Rows/Cols based on window size
+        let cols = (window_size.width as f32 / renderer.char_width) as usize;
+        let rows = (window_size.height as f32 / renderer.char_height) as usize;
+
+        // 3. Create Terminal and PTY with correct size
+        let terminal = Terminal::new(cols, rows);
+
+        // We need the proxy to create the PTY
+        let proxy = event_loop.create_proxy();
+        let pty = Pty::spawn(proxy, cols as u16, rows as u16)?;
+
         let parser = Parser::new();
 
         Ok(Self {
@@ -86,7 +96,6 @@ impl RoseWindow {
         if input.key_pressed(VirtualKeyCode::Return) {
              let _ = self.pty.writer.write_all(b"\n");
         }
-        // Handle Arrows
         if input.key_pressed(VirtualKeyCode::Up) { let _ = self.pty.writer.write_all(b"\x1b[A"); }
         if input.key_pressed(VirtualKeyCode::Down) { let _ = self.pty.writer.write_all(b"\x1b[B"); }
         if input.key_pressed(VirtualKeyCode::Right) { let _ = self.pty.writer.write_all(b"\x1b[C"); }
@@ -102,10 +111,9 @@ impl RoseWindow {
 
 pub fn run() -> Result<()> {
     let event_loop = EventLoopBuilder::<RoseEvent>::with_user_event().build();
-    let proxy = event_loop.create_proxy();
 
-    let pty = Pty::spawn(proxy)?;
-    let mut app = RoseWindow::new(&event_loop, pty)?;
+    // Init Window (Pty is now created inside new)
+    let mut app = RoseWindow::new(&event_loop)?;
     let mut input = WinitInputHelper::new();
 
     event_loop.run(move |event, _, control_flow| {
@@ -113,8 +121,6 @@ pub fn run() -> Result<()> {
             app.draw();
         }
 
-        // FIX: Use 'ref' here to borrow data, then clone it.
-        // This prevents 'event' from being moved, so input.update(&event) can still use it.
         if let Event::UserEvent(RoseEvent::PtyOutput(ref data)) = event {
              app.on_pty_data(data.clone());
              app.window.request_redraw();
@@ -126,9 +132,23 @@ pub fn run() -> Result<()> {
                 return;
             }
 
+            // HANDLE RESIZE HERE
             if let Some(size) = input.window_resized() {
                 let _ = app.pixels.resize_surface(size.width, size.height);
                 let _ = app.pixels.resize_buffer(size.width, size.height);
+
+                // 1. Calculate new grid size
+                let cols = (size.width as f32 / app.renderer.char_width) as usize;
+                let rows = (size.height as f32 / app.renderer.char_height) as usize;
+
+                if cols > 0 && rows > 0 {
+                    // 2. Resize internal grid
+                    app.terminal.resize(cols, rows);
+
+                    // 3. Tell the Shell (PTY) the new size!
+                    let _ = app.pty.resize(rows as u16, cols as u16);
+                }
+
                 app.window.request_redraw();
             }
 

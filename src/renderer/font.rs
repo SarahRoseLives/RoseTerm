@@ -4,17 +4,16 @@ use crate::terminal::grid::{Terminal, Color};
 
 pub struct FontRenderer {
     font: Font,
-    char_width: f32,
-    char_height: f32,
+    pub char_width: f32,  // Changed to pub
+    pub char_height: f32, // Changed to pub
 }
 
 impl FontRenderer {
     pub fn new() -> Result<Self> {
-        // Use your preferred font path here
         let font_data = std::fs::read("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
             .or_else(|_| std::fs::read("/usr/share/fonts/liberation/LiberationMono-Regular.ttf"))
             .or_else(|_| std::fs::read("/usr/share/fonts/gnu-free/FreeMono.ttf"))
-            .expect("Could not find a font file!");
+            .expect("Could not find a font file! Please install DejaVuSansMono or LiberationMono");
 
         let font = Font::from_bytes(font_data, FontSettings::default())
             .map_err(|e| anyhow::anyhow!("Error loading font: {}", e))?;
@@ -28,7 +27,6 @@ impl FontRenderer {
         })
     }
 
-    // Helper to convert our Color enum to RGB bytes
     fn color_to_rgb(&self, color: Color) -> (u8, u8, u8) {
         match color {
             Color::Black => (0, 0, 0),
@@ -49,13 +47,12 @@ impl FontRenderer {
             Color::BrightCyan => (41, 184, 219),
             Color::BrightWhite => (255, 255, 255),
 
-            Color::DefaultFg => (229, 229, 229), // Default Text is White-ish
-            Color::DefaultBg => (16, 16, 24),    // Default BG is Dark
+            Color::DefaultFg => (229, 229, 229),
+            Color::DefaultBg => (16, 16, 24),
         }
     }
 
     pub fn draw(&self, term: &Terminal, frame: &mut [u8], screen_width: u32) {
-        // 1. Clear screen to Default BG color
         let (bg_r, bg_g, bg_b) = self.color_to_rgb(Color::DefaultBg);
         for pixel in frame.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[bg_r, bg_g, bg_b, 255]);
@@ -63,15 +60,20 @@ impl FontRenderer {
 
         for (row_idx, row) in term.grid.iter().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
-                // Handle Background Color (if it's not the default)
-                if cell.bg != Color::DefaultBg {
-                     let (br, bg, bb) = self.color_to_rgb(cell.bg);
+
+                let (fg, bg) = if cell.inverse {
+                    (cell.bg, cell.fg)
+                } else {
+                    (cell.fg, cell.bg)
+                };
+
+                if bg != Color::DefaultBg {
+                     let (br, bg, bb) = self.color_to_rgb(bg);
                      let cx = (col_idx as f32 * self.char_width) as usize;
                      let cy = (row_idx as f32 * self.char_height) as usize;
                      let cw = self.char_width.ceil() as usize;
                      let ch = self.char_height.ceil() as usize;
 
-                     // Draw a rectangle for the background
                      for y in cy..(cy+ch) {
                          for x in cx..(cx+cw) {
                              if x >= screen_width as usize { continue; }
@@ -94,9 +96,7 @@ impl FontRenderer {
                 let cell_x_start = (col_idx as f32 * self.char_width) as i32;
                 let cell_y_start = (row_idx as f32 * self.char_height) as i32;
                 let baseline_y = cell_y_start + 16;
-
-                // Get Foreground Color
-                let (fg_r, fg_g, fg_b) = self.color_to_rgb(cell.fg);
+                let (fg_r, fg_g, fg_b) = self.color_to_rgb(fg);
 
                 for (i, coverage) in bitmap.into_iter().enumerate() {
                     let x_in_bitmap = (i % metrics.width) as i32;
@@ -111,11 +111,9 @@ impl FontRenderer {
                     let idx = (y as usize * screen_width as usize + x as usize) * 4;
 
                     if idx + 3 < frame.len() {
-                        // Blend text color
                         let alpha = coverage as f32 / 255.0;
                         let inv_alpha = 1.0 - alpha;
 
-                        // Simple blending with whatever is behind it (background color)
                         let current_r = frame[idx] as f32;
                         let current_g = frame[idx+1] as f32;
                         let current_b = frame[idx+2] as f32;
@@ -129,7 +127,6 @@ impl FontRenderer {
             }
         }
 
-        // Draw Cursor
         let cx = (term.cursor_x as f32 * self.char_width) as usize;
         let cy = (term.cursor_y as f32 * self.char_height) as usize;
         let cursor_h = self.char_height as usize;
@@ -139,7 +136,6 @@ impl FontRenderer {
             for x in cx..(cx + cursor_w) {
                 let idx = (y * screen_width as usize + x) * 4;
                 if idx + 3 < frame.len() {
-                    // Invert color for cursor effect
                     frame[idx] = 255 - frame[idx];
                     frame[idx+1] = 255 - frame[idx+1];
                     frame[idx+2] = 255 - frame[idx+2];

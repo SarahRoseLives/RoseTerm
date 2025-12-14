@@ -1,6 +1,5 @@
 use vte::{Perform, Params};
 
-// 1. Define the Colors available
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Color {
     Black, Red, Green, Yellow, Blue, Magenta, Cyan, White,
@@ -9,12 +8,12 @@ pub enum Color {
     DefaultBg,
 }
 
-// 2. Add Color info to the Cell
 #[derive(Clone, Copy, Debug)]
 pub struct Cell {
     pub char: char,
     pub fg: Color,
     pub bg: Color,
+    pub inverse: bool, // NEW: Track inverse state
 }
 
 impl Default for Cell {
@@ -22,7 +21,8 @@ impl Default for Cell {
         Self {
             char: ' ',
             fg: Color::DefaultFg,
-            bg: Color::DefaultBg
+            bg: Color::DefaultBg,
+            inverse: false,
         }
     }
 }
@@ -33,10 +33,11 @@ pub struct Terminal {
     pub rows: usize,
     pub cursor_x: usize,
     pub cursor_y: usize,
-
-    // 3. The "Pen" stores the *current* color settings.
     pub current_fg: Color,
     pub current_bg: Color,
+    pub current_inverse: bool, // NEW: Track pen inverse state
+    pub saved_cursor_x: usize,
+    pub saved_cursor_y: usize,
 }
 
 impl Terminal {
@@ -50,6 +51,9 @@ impl Terminal {
             cursor_y: 0,
             current_fg: Color::DefaultFg,
             current_bg: Color::DefaultBg,
+            current_inverse: false,
+            saved_cursor_x: 0,
+            saved_cursor_y: 0,
         }
     }
 
@@ -58,10 +62,32 @@ impl Terminal {
         if self.cursor_y >= self.rows {
             self.cursor_y = self.rows - 1;
             self.grid.remove(0);
-            // New lines get the default background
             self.grid.push(vec![Cell::default(); self.cols]);
         }
         self.cursor_x = 0;
+    }
+
+    fn blank_cell(&self) -> Cell {
+        Cell {
+            char: ' ',
+            fg: self.current_fg,
+            bg: self.current_bg,
+            inverse: self.current_inverse,
+        }
+    }
+
+    // NEW: Handle Resizing (needed for the layout fix later)
+    pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
+        // This is a naive resize: it just clips or extends.
+        // A real terminal would reflow text, but this is enough for nano.
+        self.grid.resize(new_rows, vec![Cell::default(); new_cols]);
+        for row in &mut self.grid {
+            row.resize(new_cols, Cell::default());
+        }
+        self.rows = new_rows;
+        self.cols = new_cols;
+        self.cursor_x = self.cursor_x.min(self.cols - 1);
+        self.cursor_y = self.cursor_y.min(self.rows - 1);
     }
 }
 
@@ -71,11 +97,11 @@ impl Perform for Terminal {
             self.new_line();
         }
 
-        // Apply the current Pen color to the cell
         self.grid[self.cursor_y][self.cursor_x] = Cell {
             char: c,
             fg: self.current_fg,
             bg: self.current_bg,
+            inverse: self.current_inverse,
         };
         self.cursor_x += 1;
     }
@@ -84,67 +110,55 @@ impl Perform for Terminal {
         match byte {
             b'\n' => self.new_line(),
             b'\r' => self.cursor_x = 0,
-            0x08 => { // Backspace
-                if self.cursor_x > 0 {
-                    self.cursor_x -= 1;
-                }
-            }
+            0x08 => { if self.cursor_x > 0 { self.cursor_x -= 1; } }
             _ => {}
         }
     }
 
     fn csi_dispatch(&mut self, params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
-        let param = params.iter().next().map(|p| p[0]).unwrap_or(0);
+        let p = |i: usize| -> usize {
+            let val = params.iter().nth(i).map(|x| x[0]).unwrap_or(1);
+            if val == 0 { 1 } else { val as usize }
+        };
 
         match action {
-            'A' => { // Up
-                 let amount = std::cmp::max(1, param) as usize;
-                 self.cursor_y = self.cursor_y.saturating_sub(amount);
+            'A' => self.cursor_y = self.cursor_y.saturating_sub(p(0)),
+            'B' => self.cursor_y = (self.cursor_y + p(0)).min(self.rows - 1),
+            'C' => self.cursor_x = (self.cursor_x + p(0)).min(self.cols - 1),
+            'D' => self.cursor_x = self.cursor_x.saturating_sub(p(0)),
+            'H' | 'f' => {
+                let row = p(0).saturating_sub(1);
+                let col = p(1).saturating_sub(1);
+                self.cursor_y = row.min(self.rows - 1);
+                self.cursor_x = col.min(self.cols - 1);
             }
-            'B' => { // Down
-                 let amount = std::cmp::max(1, param) as usize;
-                 self.cursor_y = (self.cursor_y + amount).min(self.rows - 1);
-            }
-            'C' => { // Right
-                 let amount = std::cmp::max(1, param) as usize;
-                 self.cursor_x = (self.cursor_x + amount).min(self.cols - 1);
-            }
-            'D' => { // Left
-                 let amount = std::cmp::max(1, param) as usize;
-                 self.cursor_x = self.cursor_x.saturating_sub(amount);
-            }
-            'J' => { // Erase Screen
-                // Helper to clear a cell but keep default colors
+            'G' => self.cursor_x = (p(0).saturating_sub(1)).min(self.cols - 1),
+            'd' => self.cursor_y = (p(0).saturating_sub(1)).min(self.rows - 1),
+            'J' => {
+                let param = params.iter().next().map(|x| x[0]).unwrap_or(0);
+                // Clear cell resets colors to default? Usually just clears char but keeps bg.
+                // For simplicity here, we reset to default.
                 let clear_cell = |c: &mut Cell| {
                     c.char = ' ';
-                    c.fg = Color::DefaultFg; // Fixed: using = instead of :
-                    c.bg = Color::DefaultBg; // Fixed: using = instead of :
+                    c.fg = Color::DefaultFg;
+                    c.bg = Color::DefaultBg;
+                    c.inverse = false;
                 };
-
                 match param {
-                    2 => {
-                        for row in &mut self.grid {
-                            for cell in row { clear_cell(cell); }
-                        }
-                        self.cursor_x = 0; self.cursor_y = 0;
-                    },
+                    2 => { for row in &mut self.grid { for cell in row { clear_cell(cell); } } self.cursor_x = 0; self.cursor_y = 0; },
                     0 | _ => {
-                        if self.cursor_y < self.rows {
-                             for x in self.cursor_x..self.cols {
-                                 clear_cell(&mut self.grid[self.cursor_y][x]);
-                             }
-                        }
-                        for y in (self.cursor_y + 1)..self.rows {
-                            for cell in &mut self.grid[y] { clear_cell(cell); }
-                        }
+                        if self.cursor_y < self.rows { for x in self.cursor_x..self.cols { clear_cell(&mut self.grid[self.cursor_y][x]); } }
+                        for y in (self.cursor_y + 1)..self.rows { for cell in &mut self.grid[y] { clear_cell(cell); } }
                     }
                 }
             }
-            'K' => { // Erase Line
+            'K' => {
+                let param = params.iter().next().map(|x| x[0]).unwrap_or(0);
                  let clear_cell = |c: &mut Cell| {
                     c.char = ' ';
-                    c.fg = Color::DefaultFg; // Fixed
-                    c.bg = Color::DefaultBg; // Fixed
+                    c.fg = Color::DefaultFg;
+                    c.bg = Color::DefaultBg;
+                    c.inverse = false;
                 };
                 match param {
                     2 => { for cell in &mut self.grid[self.cursor_y] { clear_cell(cell); } },
@@ -152,22 +166,65 @@ impl Perform for Terminal {
                     0 | _ => { for x in self.cursor_x..self.cols { clear_cell(&mut self.grid[self.cursor_y][x]); } }
                 }
             }
-            // 4. Handle SGR (Select Graphic Rendition) - Colors!
+            'L' => {
+                let count = p(0);
+                let cy = self.cursor_y;
+                let blank_row = vec![self.blank_cell(); self.cols];
+                if cy < self.rows {
+                    for _ in 0..count {
+                        self.grid.remove(self.rows - 1);
+                        self.grid.insert(cy, blank_row.clone());
+                    }
+                }
+            }
+            'M' => {
+                let count = p(0);
+                let cy = self.cursor_y;
+                let blank_row = vec![self.blank_cell(); self.cols];
+                if cy < self.rows {
+                    for _ in 0..count {
+                        if cy < self.grid.len() {
+                            self.grid.remove(cy);
+                            self.grid.push(blank_row.clone());
+                        }
+                    }
+                }
+            }
+            'P' => {
+                let count = p(0);
+                let cx = self.cursor_x;
+                let cy = self.cursor_y;
+                let blank = self.blank_cell();
+                for _ in 0..count {
+                    if cx < self.grid[cy].len() {
+                        self.grid[cy].remove(cx);
+                        self.grid[cy].push(blank);
+                    }
+                }
+            }
+            '@' => {
+                let count = p(0);
+                let cx = self.cursor_x;
+                let cy = self.cursor_y;
+                let blank = self.blank_cell();
+                for _ in 0..count {
+                    if cx < self.cols {
+                        self.grid[cy].insert(cx, blank);
+                        self.grid[cy].pop();
+                    }
+                }
+            }
             'm' => {
                 if params.len() == 0 {
                     self.current_fg = Color::DefaultFg;
                     self.current_bg = Color::DefaultBg;
+                    self.current_inverse = false;
                     return;
                 }
-
-                for p in params {
-                    let code = p[0];
-                    match code {
-                        0 => {
-                            self.current_fg = Color::DefaultFg;
-                            self.current_bg = Color::DefaultBg;
-                        }
-                        1 => {
+                for p_iter in params {
+                    match p_iter[0] {
+                        0 => { self.current_fg = Color::DefaultFg; self.current_bg = Color::DefaultBg; self.current_inverse = false; }
+                        1 => { // Bold
                             self.current_fg = match self.current_fg {
                                 Color::Black => Color::BrightBlack,
                                 Color::Red => Color::BrightRed,
@@ -180,6 +237,10 @@ impl Perform for Terminal {
                                 _ => self.current_fg,
                             };
                         }
+                        // NEW: Inverse Video Code
+                        7 => self.current_inverse = true,
+                        27 => self.current_inverse = false,
+
                         30 => self.current_fg = Color::Black,
                         31 => self.current_fg = Color::Red,
                         32 => self.current_fg = Color::Green,
@@ -208,7 +269,6 @@ impl Perform for Terminal {
                         95 => self.current_fg = Color::BrightMagenta,
                         96 => self.current_fg = Color::BrightCyan,
                         97 => self.current_fg = Color::BrightWhite,
-
                         _ => {}
                     }
                 }
