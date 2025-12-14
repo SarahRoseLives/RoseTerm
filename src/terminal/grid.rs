@@ -13,7 +13,7 @@ pub struct Cell {
     pub char: char,
     pub fg: Color,
     pub bg: Color,
-    pub inverse: bool, // NEW: Track inverse state
+    pub inverse: bool,
 }
 
 impl Default for Cell {
@@ -35,9 +35,10 @@ pub struct Terminal {
     pub cursor_y: usize,
     pub current_fg: Color,
     pub current_bg: Color,
-    pub current_inverse: bool, // NEW: Track pen inverse state
+    pub current_inverse: bool,
     pub saved_cursor_x: usize,
     pub saved_cursor_y: usize,
+    pub mouse_reporting: bool, // NEW: Mouse tracking flag
 }
 
 impl Terminal {
@@ -54,6 +55,7 @@ impl Terminal {
             current_inverse: false,
             saved_cursor_x: 0,
             saved_cursor_y: 0,
+            mouse_reporting: false, // Default is OFF
         }
     }
 
@@ -76,10 +78,7 @@ impl Terminal {
         }
     }
 
-    // NEW: Handle Resizing (needed for the layout fix later)
     pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
-        // This is a naive resize: it just clips or extends.
-        // A real terminal would reflow text, but this is enough for nano.
         self.grid.resize(new_rows, vec![Cell::default(); new_cols]);
         for row in &mut self.grid {
             row.resize(new_cols, Cell::default());
@@ -136,8 +135,6 @@ impl Perform for Terminal {
             'd' => self.cursor_y = (p(0).saturating_sub(1)).min(self.rows - 1),
             'J' => {
                 let param = params.iter().next().map(|x| x[0]).unwrap_or(0);
-                // Clear cell resets colors to default? Usually just clears char but keeps bg.
-                // For simplicity here, we reset to default.
                 let clear_cell = |c: &mut Cell| {
                     c.char = ' ';
                     c.fg = Color::DefaultFg;
@@ -214,6 +211,30 @@ impl Perform for Terminal {
                     }
                 }
             }
+
+            // h = Set Mode (We use this for Mouse Enable)
+            'h' => {
+                 for p in params {
+                     match p[0] {
+                         // Common mouse tracking modes
+                         1000 | 1002 | 1006 | 1015 => self.mouse_reporting = true,
+                         25 => { /* Show Cursor (already visible) */ }
+                         _ => {}
+                     }
+                 }
+            }
+
+            // l = Reset Mode (We use this for Mouse Disable)
+            'l' => {
+                 for p in params {
+                     match p[0] {
+                         1000 | 1002 | 1006 | 1015 => self.mouse_reporting = false,
+                         25 => { /* Hide Cursor (not implemented) */ }
+                         _ => {}
+                     }
+                 }
+            }
+
             'm' => {
                 if params.len() == 0 {
                     self.current_fg = Color::DefaultFg;
@@ -237,7 +258,6 @@ impl Perform for Terminal {
                                 _ => self.current_fg,
                             };
                         }
-                        // NEW: Inverse Video Code
                         7 => self.current_inverse = true,
                         27 => self.current_inverse = false,
 

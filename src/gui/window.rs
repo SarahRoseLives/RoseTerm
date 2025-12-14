@@ -19,6 +19,12 @@ pub enum RoseEvent {
     PtyOutput(Vec<u8>),
 }
 
+// Helper to format SGR Mouse Codes
+fn encode_mouse(button: u8, x: usize, y: usize, release: bool) -> String {
+    let suffix = if release { 'm' } else { 'M' };
+    format!("\x1b[<{};{};{}{}", button, x + 1, y + 1, suffix)
+}
+
 pub struct RoseWindow {
     window: winit::window::Window,
     pixels: Pixels,
@@ -40,17 +46,14 @@ impl RoseWindow {
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
         let pixels = Pixels::new(window_size.width, window_size.height, surface_texture)?;
 
-        // 1. Create Renderer first so we know char dimensions
         let renderer = FontRenderer::new()?;
 
-        // 2. Calculate initial Rows/Cols based on window size
+        // Calculate grid size
         let cols = (window_size.width as f32 / renderer.char_width) as usize;
         let rows = (window_size.height as f32 / renderer.char_height) as usize;
 
-        // 3. Create Terminal and PTY with correct size
         let terminal = Terminal::new(cols, rows);
 
-        // We need the proxy to create the PTY
         let proxy = event_loop.create_proxy();
         let pty = Pty::spawn(proxy, cols as u16, rows as u16)?;
 
@@ -93,13 +96,37 @@ impl RoseWindow {
            }
         }
 
-        if input.key_pressed(VirtualKeyCode::Return) {
-             let _ = self.pty.writer.write_all(b"\n");
-        }
+        if input.key_pressed(VirtualKeyCode::Return) { let _ = self.pty.writer.write_all(b"\n"); }
         if input.key_pressed(VirtualKeyCode::Up) { let _ = self.pty.writer.write_all(b"\x1b[A"); }
         if input.key_pressed(VirtualKeyCode::Down) { let _ = self.pty.writer.write_all(b"\x1b[B"); }
         if input.key_pressed(VirtualKeyCode::Right) { let _ = self.pty.writer.write_all(b"\x1b[C"); }
         if input.key_pressed(VirtualKeyCode::Left) { let _ = self.pty.writer.write_all(b"\x1b[D"); }
+
+        // Mouse Handling
+        if self.terminal.mouse_reporting {
+            if let Some((mx, my)) = input.mouse() {
+                let col = (mx / self.renderer.char_width) as usize;
+                let row = (my / self.renderer.char_height) as usize;
+
+                if input.mouse_pressed(0) {
+                    let msg = encode_mouse(0, col, row, false);
+                    let _ = self.pty.writer.write_all(msg.as_bytes());
+                }
+                if input.mouse_released(0) {
+                    let msg = encode_mouse(0, col, row, true);
+                    let _ = self.pty.writer.write_all(msg.as_bytes());
+                }
+
+                let scroll = input.scroll_diff();
+                if scroll > 0.0 {
+                    let msg = encode_mouse(64, col, row, false);
+                    let _ = self.pty.writer.write_all(msg.as_bytes());
+                } else if scroll < 0.0 {
+                     let msg = encode_mouse(65, col, row, false);
+                    let _ = self.pty.writer.write_all(msg.as_bytes());
+                }
+            }
+        }
     }
 
     pub fn on_pty_data(&mut self, data: Vec<u8>) {
@@ -112,11 +139,14 @@ impl RoseWindow {
 pub fn run() -> Result<()> {
     let event_loop = EventLoopBuilder::<RoseEvent>::with_user_event().build();
 
-    // Init Window (Pty is now created inside new)
     let mut app = RoseWindow::new(&event_loop)?;
     let mut input = WinitInputHelper::new();
 
     event_loop.run(move |event, _, control_flow| {
+        // FIX: Set ControlFlow to Wait.
+        // This stops the CPU from spinning at 100% when nothing is happening.
+        *control_flow = ControlFlow::Wait;
+
         if let Event::RedrawRequested(_) = event {
             app.draw();
         }
@@ -132,20 +162,15 @@ pub fn run() -> Result<()> {
                 return;
             }
 
-            // HANDLE RESIZE HERE
             if let Some(size) = input.window_resized() {
                 let _ = app.pixels.resize_surface(size.width, size.height);
                 let _ = app.pixels.resize_buffer(size.width, size.height);
 
-                // 1. Calculate new grid size
                 let cols = (size.width as f32 / app.renderer.char_width) as usize;
                 let rows = (size.height as f32 / app.renderer.char_height) as usize;
 
                 if cols > 0 && rows > 0 {
-                    // 2. Resize internal grid
                     app.terminal.resize(cols, rows);
-
-                    // 3. Tell the Shell (PTY) the new size!
                     let _ = app.pty.resize(rows as u16, cols as u16);
                 }
 
