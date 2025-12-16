@@ -36,6 +36,10 @@ pub struct Terminal {
     pub cursor_y: usize,
     pub scroll_offset: usize,
 
+    // Scroll Region Margins (0-indexed, inclusive)
+    pub scroll_top: usize,
+    pub scroll_bottom: usize,
+
     pub current_fg: Color,
     pub current_bg: Color,
     pub current_inverse: bool,
@@ -45,7 +49,7 @@ pub struct Terminal {
 
     pub title: String,
 
-    // NEW: Selection Tracking (Start X,Y -> End X,Y)
+    // Selection Tracking
     pub selection_start: Option<(usize, usize)>,
     pub selection_end: Option<(usize, usize)>,
 }
@@ -62,6 +66,10 @@ impl Terminal {
             cursor_y: 0,
             scroll_offset: 0,
 
+            // Default scroll region is the full screen
+            scroll_top: 0,
+            scroll_bottom: rows.saturating_sub(1),
+
             current_fg: Color::DefaultFg,
             current_bg: Color::DefaultBg,
             current_inverse: false,
@@ -75,7 +83,6 @@ impl Terminal {
         }
     }
 
-    // NEW: Selection Helpers
     pub fn start_selection(&mut self, col: usize, row: usize) {
         self.selection_start = Some((col, row));
         self.selection_end = Some((col, row));
@@ -92,37 +99,25 @@ impl Terminal {
         self.selection_end = None;
     }
 
-    // Check if a specific cell is inside the selection rectangle
-    // We treat selection as a stream of text (like Notepad), not a block box
     pub fn is_selected(&self, col: usize, row: usize) -> bool {
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
-            // Normalize so p1 is always before p2
             let (p1, p2) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
                 (start, end)
             } else {
                 (end, start)
             };
 
-            // Logic for wrapping selection
-            if row < p1.1 || row > p2.1 { return false; } // Outside Y bounds
-
-            if row == p1.1 && row == p2.1 {
-                // Single line selection
-                return col >= p1.0 && col <= p2.0;
-            }
-
-            if row == p1.1 { return col >= p1.0; } // Start line: select to end
-            if row == p2.1 { return col <= p2.0; } // End line: select from start
-
-            return true; // Middle lines are fully selected
+            if row < p1.1 || row > p2.1 { return false; }
+            if row == p1.1 && row == p2.1 { return col >= p1.0 && col <= p2.0; }
+            if row == p1.1 { return col >= p1.0; }
+            if row == p2.1 { return col <= p2.0; }
+            return true;
         }
         false
     }
 
-    // Extract text string from selection
     pub fn get_selected_text(&self) -> String {
         let mut text = String::new();
-
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
             let (p1, p2) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
                 (start, end)
@@ -131,10 +126,7 @@ impl Terminal {
             };
 
             for r in p1.1..=p2.1 {
-                // Be careful: rows can change if we scroll history during selection.
-                // For this prototype, we assume static screen coordinates.
                 let row_data = self.get_visible_row(r);
-
                 let start_col = if r == p1.1 { p1.0 } else { 0 };
                 let end_col = if r == p2.1 { p2.0 } else { self.cols - 1 };
 
@@ -143,29 +135,37 @@ impl Terminal {
                         text.push(row_data[c].char);
                     }
                 }
-                if r != p2.1 {
-                    text.push('\n');
-                }
+                if r != p2.1 { text.push('\n'); }
             }
         }
         text
     }
 
+    // FIX: Updated new_line to respect Scrolling Regions
     fn new_line(&mut self) {
-        self.cursor_y += 1;
-        if self.cursor_y >= self.rows {
-            self.cursor_y = self.rows - 1;
+        if self.cursor_y == self.scroll_bottom {
+            // We are at the bottom of the scroll region.
+            // Remove the top line of the region.
+            let removed = self.grid.remove(self.scroll_top);
 
-            let old_row = self.grid.remove(0);
-            if self.history.len() > 10_000 {
-                self.history.remove(0);
+            // Only push to history if we are scrolling from the absolute top (0)
+            if self.scroll_top == 0 {
+                if self.history.len() > 10_000 {
+                    self.history.remove(0);
+                }
+                self.history.push(removed);
             }
-            self.history.push(old_row);
 
-            self.grid.push(vec![Cell::default(); self.cols]);
+            // Insert a new blank line at the bottom of the region
+            self.grid.insert(self.scroll_bottom, vec![self.blank_cell(); self.cols]);
+        } else {
+            // Otherwise, simply move the cursor down
+            self.cursor_y += 1;
+            // Safety clamp
+            if self.cursor_y >= self.rows {
+                self.cursor_y = self.rows - 1;
+            }
         }
-        // FIX: Remove cursor_x = 0;
-        // Strict emulation: LF only does Y+1. CR does X=0.
     }
 
     pub fn scroll_up(&mut self, lines: usize) {
@@ -188,8 +188,8 @@ impl Terminal {
                 let history_index = total_history - (effective_offset - self.rows + 1);
                 &self.history[history_index]
             } else {
-                 let grid_index = self.rows - effective_offset - 1;
-                 &self.grid[grid_index]
+                let grid_index = self.rows - effective_offset - 1;
+                &self.grid[grid_index]
             }
         }
     }
@@ -210,6 +210,10 @@ impl Terminal {
         }
         self.rows = new_rows;
         self.cols = new_cols;
+        // Reset scroll region to full screen on resize
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows.saturating_sub(1);
+
         self.cursor_x = self.cursor_x.min(self.cols - 1);
         self.cursor_y = self.cursor_y.min(self.rows - 1);
         self.scroll_offset = 0;
@@ -220,7 +224,6 @@ impl Perform for Terminal {
     fn print(&mut self, c: char) {
         if self.cursor_x >= self.cols {
             self.new_line();
-            // FIX: Explicitly reset x if we wrap due to text width
             self.cursor_x = 0;
         }
         self.grid[self.cursor_y][self.cursor_x] = Cell {
@@ -290,7 +293,7 @@ impl Perform for Terminal {
             }
             'K' => {
                 let param = params.iter().next().map(|x| x[0]).unwrap_or(0);
-                 let clear_cell = |c: &mut Cell| {
+                let clear_cell = |c: &mut Cell| {
                     c.char = ' ';
                     c.fg = Color::DefaultFg;
                     c.bg = Color::DefaultBg;
@@ -302,27 +305,31 @@ impl Perform for Terminal {
                     0 | _ => { for x in self.cursor_x..self.cols { clear_cell(&mut self.grid[self.cursor_y][x]); } }
                 }
             }
+            // FIX: Updated L (Insert Line) to respect margins
             'L' => {
                 let count = p(0);
                 let cy = self.cursor_y;
                 let blank_row = vec![self.blank_cell(); self.cols];
-                if cy < self.rows {
+
+                // Only insert if cursor is inside the scroll region
+                if cy >= self.scroll_top && cy <= self.scroll_bottom {
                     for _ in 0..count {
-                        self.grid.remove(self.rows - 1);
+                        self.grid.remove(self.scroll_bottom);
                         self.grid.insert(cy, blank_row.clone());
                     }
                 }
             }
+            // FIX: Updated M (Delete Line) to respect margins
             'M' => {
                 let count = p(0);
                 let cy = self.cursor_y;
                 let blank_row = vec![self.blank_cell(); self.cols];
-                if cy < self.rows {
+
+                // Only delete if cursor is inside the scroll region
+                if cy >= self.scroll_top && cy <= self.scroll_bottom {
                     for _ in 0..count {
-                        if cy < self.grid.len() {
-                            self.grid.remove(cy);
-                            self.grid.push(blank_row.clone());
-                        }
+                        self.grid.remove(cy);
+                        self.grid.insert(self.scroll_bottom, blank_row.clone());
                     }
                 }
             }
@@ -349,6 +356,25 @@ impl Perform for Terminal {
                         self.grid[cy].pop();
                     }
                 }
+            }
+            // FIX: Added 'r' (DECSTBM - Set Top and Bottom Margins)
+            'r' => {
+                let top = p(0).saturating_sub(1);
+                // If param 1 is missing, it usually defaults to bottom of screen
+                let bot = if params.len() > 1 { p(1).saturating_sub(1) } else { self.rows - 1 };
+
+                self.scroll_top = top.min(self.rows - 1);
+                self.scroll_bottom = bot.min(self.rows - 1);
+
+                // Validation: Bottom must be > Top
+                if self.scroll_bottom <= self.scroll_top {
+                    self.scroll_top = 0;
+                    self.scroll_bottom = self.rows.saturating_sub(1);
+                }
+
+                // CSI r always moves cursor to (0,0) according to spec
+                self.cursor_x = 0;
+                self.cursor_y = 0;
             }
             'h' => {
                  for p in params {
