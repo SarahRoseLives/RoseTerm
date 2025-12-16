@@ -164,7 +164,8 @@ impl Terminal {
 
             self.grid.push(vec![Cell::default(); self.cols]);
         }
-        self.cursor_x = 0;
+        // FIX: Remove cursor_x = 0;
+        // Strict emulation: LF only does Y+1. CR does X=0.
     }
 
     pub fn scroll_up(&mut self, lines: usize) {
@@ -219,6 +220,8 @@ impl Perform for Terminal {
     fn print(&mut self, c: char) {
         if self.cursor_x >= self.cols {
             self.new_line();
+            // FIX: Explicitly reset x if we wrap due to text width
+            self.cursor_x = 0;
         }
         self.grid[self.cursor_y][self.cursor_x] = Cell {
             char: c,
